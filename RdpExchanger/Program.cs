@@ -18,8 +18,13 @@ namespace RdpExchanger
         public bool autoTray = true;
 
         public int bufferSize = 1 * 1024 * 1024; // 1MB
-        public int remotePort = 23389;
-        public int hostPort = 23390;
+        public int remotePort = 21001;
+        public int hostPort = 21000;
+
+        public int remotePortStart = 21001;
+        public int remotePortEnd = 21999;
+
+
         public ProgramOptions_Client client = new ProgramOptions_Client();
 
         public class ProgramOptions_Client

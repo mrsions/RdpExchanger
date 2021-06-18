@@ -77,13 +77,6 @@ namespace RdpExchanger
         {
             static ILog log = LogManager.GetLogger(nameof(HostServerManager));
 
-            public Socket server;
-            public Dictionary<string, ExchangeHost> HostList { get; private set; } = new Dictionary<string, ExchangeHost>();
-            public bool IsRun => canceller != null && !canceller.IsCancellationRequested;
-
-            private CancellationTokenSource canceller;
-            private Task runningTask;
-            private ExchangeServer master;
 
             public HostServerManager(ExchangeServer master)
             {
