@@ -47,6 +47,16 @@ public static class Extensions
         }
         return socket.EndReceive(rst);
     }
+    public static async Task<byte[]> ReceiveBytesAsync(this Socket socket, int bytes, CancellationToken token = default)
+    {
+        byte[] data = new byte[bytes];
+        int offset = 0;
+        while (offset < data.Length)
+        {
+            offset += await socket.ReceiveAsync(data, offset, data.Length - offset, token);
+        }
+        return data;
+    }
     public static async Task<int> WriteAsync(this Socket socket, byte[] data, int offset = 0, int length = -1, CancellationToken token = default, int timeoutMs = 0)
     {
         DateTime dt = DateTime.Now;

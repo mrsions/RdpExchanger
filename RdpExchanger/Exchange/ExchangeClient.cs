@@ -20,73 +20,69 @@ namespace RdpExchanger
     {
         static ILog log = LogManager.GetLogger("HostClient");
 
-        private Socket remoteSck;
-        private Socket hostSck;
         private CancellationTokenSource canceller;
-        private DateTime lastNetworkTime;
+        private List<Connection> connections = new List<Connection>();
 
         public bool IsRun { get; private set; }
 
-        public void Start()
+        public async Task Start()
         {
             if (IsRun) return;
             IsRun = true;
             canceller = new CancellationTokenSource();
-            Run();
+            Task.Run(Run, canceller.Token);
         }
 
-        public void Stop()
+        public async Task Stop()
         {
             IsRun = false;
             canceller?.Cancel();
-            try { remoteSck?.Shutdown(SocketShutdown.Both); remoteSck?.Disconnect(false); } catch { } finally { remoteSck = null; }
-            try { hostSck?.Shutdown(SocketShutdown.Both); remoteSck?.Disconnect(false); } catch { } finally { hostSck = null; }
         }
 
-        private async void Run()
+        private async Task Run()
         {
             while (IsRun)
             {
-                try { remoteSck?.Shutdown(SocketShutdown.Both); remoteSck?.Disconnect(false); } catch { } finally { remoteSck = null; }
-                try { hostSck?.Shutdown(SocketShutdown.Both); remoteSck?.Disconnect(false); } catch { } finally { hostSck = null; }
+                Socket remoteSck = null;
                 try
                 {
-                    using (remoteSck = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp))
+                    remoteSck = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+
+                    log.Info($"Connecting to {options.client.domain}:{CONTAINER_SERVER_PORT}");
+                    await remoteSck.ConnectAsync(options.client.domain, CONTAINER_SERVER_PORT, canceller.Token);
+                    if (!remoteSck.Connected)
                     {
-                        log.Info($"Connecting to {options.client.domain}:{HOST_SERVER_PORT}");
-                        await remoteSck.ConnectAsync(options.client.domain, HOST_SERVER_PORT, canceller.Token);
-                        if (!remoteSck.Connected)
-                        {
-                            await Task.Delay(1000);
-                            continue;
-                        }
-                        remoteSck.ReceiveTimeout = 3000;
-                        remoteSck.SendTimeout = 3000;
+                        await Task.Delay(1000);
+                        continue;
+                    }
+                    remoteSck.ReceiveTimeout = 3000;
+                    remoteSck.SendTimeout = 3000;
 
-                        // 헤더 데이터 전송
-                        log.Info("Send RdpServerHeader");
-                        byte[] data = MakeHeader();
+                    // 헤더 데이터 전송
+                    log.Info("Send RdpServerHeader");
+                    byte[] data = MakeHeader();
+                    await remoteSck.WriteAsync(data, token: canceller.Token);
 
-                        await remoteSck.WriteAsync(data, token: canceller.Token);
-
-                        // 접속까지 대기
-                        log.Info(remoteSck, "Wait for connection");
-                        if (await WaitForConnection(remoteSck))
-                        {
-                            // 원격용 소켓 접속
-                            await ConnectLocalRdp();
-                            log.Info(hostSck, "connecting");
-
-                            // 데이터 송수신
-                            Task receive = WorkStream("Receive", remoteSck, hostSck);
-                            Task send = WorkStream("Send", hostSck, remoteSck);
-                            await CancelStream(receive, send);
-                        }
+                    // 접속까지 대기
+                    log.Info(remoteSck, "Wait for connection");
+                    if (await WaitForConnection(remoteSck))
+                    {
+                        var conn = new Connection(remoteSck);
+                        await conn.Start();
+                        connections.Add(conn);
+                        remoteSck = null;
                     }
                 }
                 catch (Exception e)
                 {
                     Console.WriteLine(e);
+                }
+                finally
+                {
+                    if (remoteSck != null)
+                    {
+                        try { remoteSck.Dispose(); } catch { }
+                    }
                 }
             }
         }
@@ -99,9 +95,23 @@ namespace RdpExchanger
                 int readBytes = await socket.ReceiveAsync(data, 0, 1, canceller.Token, 3000);
                 if (readBytes > 0)
                 {
-                    if (data[0] == 1) // 데이터가 1이 넘어오면
+                    if (data[0] == OPCODE_CONNECT) // 데이터가 1이 넘어오면
                     {
                         return true;
+                    }
+                    else if (data[0] == OPCODE_ERROR)
+                    {
+                        try
+                        {
+                            int size = BitConverter.ToInt32(await socket.ReceiveBytesAsync(4, canceller.Token), 0);
+                            string msg = Encoding.UTF8.GetString(await socket.ReceiveBytesAsync(size, canceller.Token));
+                            log.Error(msg);
+                            return false;
+                        }
+                        catch (Exception e)
+                        {
+                            throw e;
+                        }
                     }
                 }
                 else
@@ -120,73 +130,119 @@ namespace RdpExchanger
                 throw new ArgumentException("Client name is NOT whitespace or more than 32.");
             }
 
-            if (options.client.connections == null || options.client.connections.Length == 0 || string.IsNullOrWhiteSpace(options.client.connections[0]))
-            {
-                log.Error("Client connection can NOT empty.");
-                throw new ArgumentException("Client connection can NOT empty.");
-            }
-
             using (var m = new MemoryStream())
             using (var w = new BinaryWriter(m, Encoding.UTF8))
             {
                 w.Write((int)0);
                 w.Write((int)VERSION);
                 w.Write(options.client.name);
-                w.Write((int)options.client.connections.Length);
-                foreach (var address in options.client.connections)
-                {
-                    w.Write(address);
-                }
-                w.Flush();
+                w.Write(options.client.port);
                 w.Seek(0, SeekOrigin.Begin);
-                w.Write(m.Length);
+                w.Write((int)m.Length);
+                w.Flush();
 
                 return m.ToArray();
             }
         }
-
-        private async Task ConnectLocalRdp()
+        public class Connection : IExchangeWorker
         {
-            hostSck = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-            await hostSck.ConnectAsync(new IPEndPoint(IPAddress.Parse("127.0.0.1"), 3389));
-        }
+            private Socket remoteSck;
+            private Socket hostSck;
+            private ILog log;
+            private CancellationTokenSource canceller;
+            private Task task;
 
-        private async Task CancelStream(Task a, Task b)
-        {
-            lastNetworkTime = DateTime.Now;
-            while (IsRun)
+            public bool IsRun => task != null && !task.IsCompleted && !task.IsFaulted && !task.IsCanceled && !canceller.IsCancellationRequested;
+
+            public Connection(Socket remoteSck)
             {
-                while (a.IsCompleted || a.IsFaulted || b.IsCompleted || b.IsFaulted)
-                {
-                    break;
-                }
-                if ((DateTime.Now - lastNetworkTime).TotalSeconds > 2)
-                {
-                    break;
-                }
-                await Task.Delay(100);
+                this.remoteSck = remoteSck;
+                this.canceller = new CancellationTokenSource();
+                this.log = LogManager.GetLogger($"Connection");
+                this.log.Info("Connected");
             }
-        }
 
-        private async Task WorkStream(string tag, Socket read, Socket write)
-        {
-            byte[] buffer = new byte[BUFFER_SIZE];
-            try
+            public async Task Start()
             {
-                while (IsRun || read.Connected || write.Connected || !canceller.IsCancellationRequested)
+                task = Task.Run(Run);
+                await Task.CompletedTask;
+            }
+
+            public async Task Stop()
+            {
+                canceller.Cancel();
+                while (remoteSck != null) await Task.Delay(10);
+                task = null;
+            }
+
+            private async Task Run()
+            {
+                try
                 {
-                    int size = await read.ReceiveAsync(buffer, token: canceller.Token);
-                    if (size > 0)
+                    // 원격용 소켓 접속
+                    await ConnectLocalRdp();
+                    log.Info("connecting");
+
+                    // 데이터 송수신
+                    Task receive = Task.Factory.StartNew(RemoteToHost);
+                    Task send = Task.Factory.StartNew(HostToRemote);
+                    await CancelStream(receive, send);
+                }
+                finally
+                {
+                    try { hostSck?.Disconnect(false); } catch { }
+                    try { hostSck?.Close(); } catch { }
+                    try { hostSck?.Dispose(); } catch { }
+                    hostSck = null;
+                    try { remoteSck?.Disconnect(false); } catch { }
+                    try { remoteSck?.Close(); } catch { }
+                    try { remoteSck?.Dispose(); } catch { }
+                    remoteSck = null;
+                }
+            }
+
+            private async Task ConnectLocalRdp()
+            {
+                hostSck = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+                await hostSck.ConnectAsync(new IPEndPoint(IPAddress.Parse("127.0.0.1"), 3389));
+            }
+
+            private async Task CancelStream(Task a, Task b)
+            {
+                while (IsRun)
+                {
+                    while (a.IsCompleted || a.IsFaulted || b.IsCompleted || b.IsFaulted)
                     {
-                        //log.Debug($"{tag} => {size}");
-                        await write.WriteAsync(buffer, 0, size);
-                        lastNetworkTime = DateTime.Now;
+                        break;
+                    }
+                    await Task.Delay(100);
+                }
+            }
+
+            private void RemoteToHost() => WorkStream("Receive", remoteSck, hostSck);
+            private void HostToRemote() => WorkStream("Send", hostSck, remoteSck);
+            private void WorkStream(string tag, Socket read, Socket write)
+            {
+                byte[] buffer = new byte[BUFFER_SIZE];
+                try
+                {
+                    while (IsRun && read.Connected && write.Connected && !canceller.IsCancellationRequested)
+                    {
+                        int size = read.Receive(buffer, 0, buffer.Length, SocketFlags.None);
+                        if (size > 0)
+                        {
+                            write.Send(buffer, 0, size, SocketFlags.None);
+                            //log.Debug($"{tag} => {size}");
+                            //byte[] data = new byte[size];
+                            //Buffer.BlockCopy(buffer, 0, data, 0, size);
+                            //write.WriteAsync(data, 0, data.Length);
+                        }
                     }
                 }
-            }
-            catch (Exception e)
-            {
-                Console.WriteLine(tag + " / " + e);
+                catch (Exception e)
+                {
+                    Console.WriteLine(tag + " / " + e);
+                }
             }
         }
     }

@@ -47,13 +47,13 @@ namespace RdpExchanger
             }
 
             log.Info("Request Start");
-            log.Info($"Create Server (port:{HOST_SERVER_PORT})");
+            log.Info($"Create Server (port:{CONTAINER_SERVER_PORT})");
             server = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-            server.Bind(new IPEndPoint(IPAddress.Any, HOST_SERVER_PORT));
+            server.Bind(new IPEndPoint(IPAddress.Any, CONTAINER_SERVER_PORT));
             server.Listen(-100);
             canceller = new CancellationTokenSource();
 
-            task = Task.Factory.StartNew(Run, canceller.Token);
+            task = Task.Run(Run, canceller.Token);
             log.Info("Request Start Complete");
             await Task.CompletedTask;
         }
@@ -79,7 +79,7 @@ namespace RdpExchanger
             log.Info("Request Stop Complete");
         }
 
-        private async void Run()
+        private async Task Run()
         {
             while (IsRun)
             {
@@ -88,7 +88,7 @@ namespace RdpExchanger
                     var acceptSocket = await server.AcceptAsync(canceller.Token);
                     if (acceptSocket == null) continue;
 
-                    new Connection(this, acceptSocket).Start();
+                    await new Connection(this, acceptSocket).Start();
                 }
                 catch (Exception e)
                 {
@@ -116,6 +116,11 @@ namespace RdpExchanger
             Connections.Remove(connection);
         }
 
+        private async Task<ExchangeRdpServer> OpenRdpServer(int receivePort, Connection connection)
+        {
+            return await ExchangeServer.Instance.OpenRdpServer(receivePort, connection);
+        }
+
         public class Connection : Common, IExchangeWorker
         {
             ///////////////////////////////////////////////////////////////////////////////////////
@@ -135,6 +140,7 @@ namespace RdpExchanger
             private readonly ILog log;
             private readonly string ipAddress;
 
+            private ExchangeRdpServer rdpServer;
             private CancellationTokenSource canceller;
             private Task task;
 
@@ -162,7 +168,7 @@ namespace RdpExchanger
                 }
 
                 canceller = new CancellationTokenSource();
-                task = Task.Factory.StartNew(Run, canceller.Token);
+                task = Task.Run(Run, canceller.Token);
                 log.Info("Request Start Complete");
                 await Task.CompletedTask;
             }
@@ -189,18 +195,19 @@ namespace RdpExchanger
             //
             ///////////////////////////////////////////////////////////////////////////////////////
 
-            private async void Run()
+            private async Task Run()
             {
                 try
                 {
                     log.Info("Read Header");
                     await ReadHeaderPacket();
                     server.AddConnection(this);
+                    rdpServer = await server.OpenRdpServer(ReceivePort, this);
 
                     log.Info("Wait for connection");
                     // wait for target
                     DateTime pingTiming = default;
-                    while (TargetSocket != null)
+                    while (TargetSocket == null)
                     {
                         if ((DateTime.Now - pingTiming).TotalSeconds > 1)
                         {
@@ -211,25 +218,26 @@ namespace RdpExchanger
                     }
 
                     // connecting
-                    log.Info("Connected!");
-                    SendConnecting();
+                    log.Info("Connected Target!");
+                    await SendConnecting();
 
                     // trasaction
-                    Task broadcastA = Task.Factory.StartNew(ConnToTarget, canceller.Token);
-                    Task broadcastB = Task.Factory.StartNew(TargetToConn, canceller.Token);
+                    log.Info("Exchange Connections!");
+                    Task receive = Task.Factory.StartNew(RemoteToHost);
+                    Task send = Task.Factory.StartNew(HostToRemote);
 
                     while (IsRun)
                     {
-                        if (broadcastA.IsFaulted)
+                        if (receive.IsFaulted)
                         {
-                            throw broadcastA.Exception;
+                            throw receive.Exception;
                         }
-                        if (broadcastB.IsFaulted)
+                        if (send.IsFaulted)
                         {
-                            throw broadcastA.Exception;
+                            throw receive.Exception;
                         }
 
-                        if (broadcastA.IsCanceled || broadcastA.IsCompleted || broadcastB.IsCanceled || broadcastB.IsCompleted)
+                        if (receive.IsCanceled || receive.IsCompleted || send.IsCanceled || send.IsCompleted)
                         {
                             break;
                         }
@@ -246,6 +254,7 @@ namespace RdpExchanger
                 {
                     log.Info("Disconnect!");
                     server.RemoveConnection(this);
+                    rdpServer?.RemoveConnection(this);
                 }
             }
 
@@ -257,12 +266,12 @@ namespace RdpExchanger
 
             private Task SendPing()
             {
-                return socket.WriteAsync(new byte[] { 0 });
+                return socket.WriteAsync(new byte[] { OPCODE_PING });
             }
 
             private Task SendConnecting()
             {
-                return socket.WriteAsync(new byte[] { 1 });
+                return socket.WriteAsync(new byte[] { OPCODE_CONNECT });
             }
 
             private async Task SendThrowException(string msg)
@@ -277,7 +286,7 @@ namespace RdpExchanger
                         writer.Write(msgBytes.Length);
                         writer.Write(msgBytes);
 
-                        socket.WriteAsync(st.ToArray());
+                        await socket.WriteAsync(st.ToArray());
                     }
                 }
                 catch { }
@@ -287,8 +296,8 @@ namespace RdpExchanger
 
             private async Task ReadHeaderPacket()
             {
-                int packetSize = BitConverter.ToInt32(await ReadBytes(4), 0);
-                byte[] data = await ReadBytes(packetSize - 4);
+                int packetSize = BitConverter.ToInt32(await socket.ReceiveBytesAsync(4, canceller.Token), 0);
+                byte[] data = await socket.ReceiveBytesAsync(packetSize - 4, canceller.Token);
 
                 using (var st = new MemoryStream(data, false))
                 using (var reader = new BinaryReader(st, Encoding.UTF8))
@@ -301,26 +310,26 @@ namespace RdpExchanger
                     // Validate
                     if (ClientVersion != VERSION)
                     {
-                        SendThrowException($"Missmatch version. ({ClientVersion} != {VERSION})");
+                        await SendThrowException($"Missmatch version. ({ClientVersion} != {VERSION})");
                     }
 
                     if (options.remotePortEnd < ReceivePort || ReceivePort < options.remotePortStart)
                     {
-                        SendThrowException($"{ReceivePort} is NOT available port. Please use between {options.remotePortStart:n0}~{options.remotePortEnd:n0}");
+                        await SendThrowException($"{ReceivePort} is NOT available port. Please use between {options.remotePortStart:n0}~{options.remotePortEnd:n0}");
                     }
                 }
             }
 
-            private async Task<byte[]> ReadBytes(int bytes)
-            {
-                byte[] data = new byte[4];
-                int offset = 0;
-                while (offset < data.Length)
-                {
-                    offset += await socket.ReceiveAsync(data, offset, data.Length - offset, canceller.Token);
-                }
-                return data;
-            }
+            //private async Task<byte[]> ReadBytes(int bytes)
+            //{
+            //    byte[] data = new byte[bytes];
+            //    int offset = 0;
+            //    while (offset < data.Length)
+            //    {
+            //        offset += await socket.ReceiveAsync(data, offset, data.Length - offset, canceller.Token);
+            //    }
+            //    return data;
+            //}
 
 
             ///////////////////////////////////////////////////////////////////////////////////////
@@ -329,36 +338,27 @@ namespace RdpExchanger
             //
             ///////////////////////////////////////////////////////////////////////////////////////
 
-            private Task ConnToTarget()
-            {
-                return CopyToStream(socket, TargetSocket);
-            }
-
-            private Task TargetToConn()
-            {
-                return CopyToStream(TargetSocket, socket);
-            }
-
-            private async Task CopyToStream(Socket read, Socket write)
+            private void RemoteToHost() => WorkStream("Receive", TargetSocket, socket);
+            private void HostToRemote() => WorkStream("Send", socket, TargetSocket);
+            private void WorkStream(string tag, Socket read, Socket write)
             {
                 byte[] buffer = new byte[BUFFER_SIZE];
                 try
                 {
                     while (IsRun && read.Connected && write.Connected && !canceller.IsCancellationRequested)
                     {
-                        int size = await read.ReceiveAsync(buffer, token: canceller.Token);
+                        int size = read.Receive(buffer, 0, buffer.Length, SocketFlags.None);
                         if (size > 0)
                         {
-                            await write.WriteAsync(buffer, 0, size);
+                            write.Send(buffer, 0, size, SocketFlags.None);
                         }
                     }
                 }
                 catch (Exception e)
                 {
-                    log.Error(e.Message, e);
+                    Console.WriteLine(tag + " / " + e);
                 }
             }
-
         }
     }
 }

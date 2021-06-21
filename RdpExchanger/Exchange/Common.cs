@@ -13,8 +13,8 @@ namespace RdpExchanger
         public static ProgramOptions options = new ProgramOptions();
 
         public static int BUFFER_SIZE => options.bufferSize;
-        public static int HOST_REMOTE_PORT => options.remotePort;
-        public static int HOST_SERVER_PORT => options.hostPort;
+        //public static int HOST_REMOTE_PORT => options.remotePort;
+        public static int CONTAINER_SERVER_PORT => options.containerPort;
 
         public const byte OPCODE_PING = 0;
         public const byte OPCODE_CONNECT = 1;
