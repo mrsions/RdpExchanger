@@ -78,7 +78,7 @@ namespace RdpExchanger
 
             log.Info("Request Stop Complete");
         }
-
+        
         private async Task Run()
         {
             while (IsRun)
@@ -133,12 +133,13 @@ namespace RdpExchanger
             public string Name { get; private set; }
             public int ReceivePort { get; private set; }
             public int ClientVersion { get; private set; }
-            public bool IsRun => task != null && canceller != null && !task.IsCompleted && !task.IsFaulted && !task.IsCanceled && !canceller.IsCancellationRequested;
+            public bool IsRun { get; private set; }//=> task != null && canceller != null && !task.IsCompleted && !task.IsFaulted && !task.IsCanceled && !canceller.IsCancellationRequested;
 
             private readonly ExchangeHostContainerServer server;
             private readonly Socket socket;
             private readonly ILog log;
             private readonly string ipAddress;
+            private DateTime lastTransmitTime;
 
             private ExchangeRdpServer rdpServer;
             private CancellationTokenSource canceller;
@@ -167,6 +168,7 @@ namespace RdpExchanger
                     return;
                 }
 
+                IsRun = true;
                 canceller = new CancellationTokenSource();
                 task = Task.Run(Run, canceller.Token);
                 log.Info("Request Start Complete");
@@ -178,6 +180,7 @@ namespace RdpExchanger
                 log.Info("Request Stop");
 
                 // 활동종료
+                IsRun = false;
                 canceller.Cancel();
                 // 서버종료
                 try { socket?.Shutdown(SocketShutdown.Both); } catch { }
@@ -241,6 +244,8 @@ namespace RdpExchanger
                         {
                             break;
                         }
+
+                        await Task.Delay(1);
                     }
                 }
                 catch (Exception e)
@@ -255,6 +260,7 @@ namespace RdpExchanger
                     log.Info("Disconnect!");
                     server.RemoveConnection(this);
                     rdpServer?.RemoveConnection(this);
+                    IsRun = false;
                 }
             }
 
@@ -345,12 +351,19 @@ namespace RdpExchanger
                 byte[] buffer = new byte[BUFFER_SIZE];
                 try
                 {
+                    lastTransmitTime = DateTime.Now;
                     while (IsRun && read.Connected && write.Connected && !canceller.IsCancellationRequested)
                     {
                         int size = read.Receive(buffer, 0, buffer.Length, SocketFlags.None);
                         if (size > 0)
                         {
                             write.Send(buffer, 0, size, SocketFlags.None);
+                            lastTransmitTime = DateTime.Now;
+                        }
+                        else if ((DateTime.Now - lastTransmitTime).TotalSeconds > 5)
+                        {
+                            log.Warn(tag + ": Timeout");
+                            break;
                         }
                     }
                 }

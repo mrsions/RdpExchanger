@@ -151,6 +151,7 @@ namespace RdpExchanger
             private ILog log;
             private CancellationTokenSource canceller;
             private Task task;
+            private DateTime lastTransmitTime;
 
             public bool IsRun => task != null && !task.IsCompleted && !task.IsFaulted && !task.IsCanceled && !canceller.IsCancellationRequested;
 
@@ -226,16 +227,20 @@ namespace RdpExchanger
                 byte[] buffer = new byte[BUFFER_SIZE];
                 try
                 {
+                    lastTransmitTime = DateTime.Now;
                     while (IsRun && read.Connected && write.Connected && !canceller.IsCancellationRequested)
                     {
                         int size = read.Receive(buffer, 0, buffer.Length, SocketFlags.None);
                         if (size > 0)
                         {
-                            write.Send(buffer, 0, size, SocketFlags.None);
                             //log.Debug($"{tag} => {size}");
-                            //byte[] data = new byte[size];
-                            //Buffer.BlockCopy(buffer, 0, data, 0, size);
-                            //write.WriteAsync(data, 0, data.Length);
+                            write.Send(buffer, 0, size, SocketFlags.None);
+                            lastTransmitTime = DateTime.Now;
+                        }
+                        else if((DateTime.Now-lastTransmitTime).TotalSeconds > 5)
+                        {
+                            log.Warn(tag+": Timeout");
+                            break;
                         }
                     }
                 }
