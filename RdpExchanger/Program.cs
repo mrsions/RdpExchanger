@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
@@ -21,9 +22,10 @@ namespace RdpExchanger
         public int containerPort = 21000;
         public int remotePortStart = 21001;
         public int remotePortEnd = 21999;
-
+        public double timeout = 30;
 
         public ProgramOptions_Client client = new ProgramOptions_Client();
+
 
         public class ProgramOptions_Client
         {
@@ -44,22 +46,27 @@ namespace RdpExchanger
         [STAThread]
         static void Main()
         {
-            XmlConfigurator.Configure(new FileInfo("log4net.xml"));
-            log = LogManager.GetLogger(typeof(Program).Name);
+            Mutex mutex = new Mutex(true, "RdpExchanger", out var createNew);
 
-            if (!File.Exists("config.json"))
+            if (createNew)
             {
-                log.Info("Create config.json.");
-                JsonWriter writer = new JsonWriter();
-                writer.PrettyPrint = true;
-                JsonMapper.ToJson(Common.options, writer);
-                File.WriteAllText("config.json", writer.ToString());
-            }
-            LoadConfigs();
+                XmlConfigurator.Configure(new FileInfo("log4net.xml"));
+                log = LogManager.GetLogger(typeof(Program).Name);
 
-            Application.EnableVisualStyles();
-            Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new Form1());
+                if (!File.Exists("config.json"))
+                {
+                    log.Info("Create config.json.");
+                    JsonWriter writer = new JsonWriter();
+                    writer.PrettyPrint = true;
+                    JsonMapper.ToJson(Common.options, writer);
+                    File.WriteAllText("config.json", writer.ToString());
+                }
+                LoadConfigs();
+
+                Application.EnableVisualStyles();
+                Application.SetCompatibleTextRenderingDefault(false);
+                Application.Run(new Form1());
+            }
         }
 
         public static void LoadConfigs()

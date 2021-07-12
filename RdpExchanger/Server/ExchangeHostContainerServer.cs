@@ -139,7 +139,6 @@ namespace RdpExchanger
             private readonly Socket socket;
             private readonly ILog log;
             private readonly string ipAddress;
-            private DateTime lastTransmitTime;
 
             private ExchangeRdpServer rdpServer;
             private CancellationTokenSource canceller;
@@ -348,28 +347,38 @@ namespace RdpExchanger
             private void HostToRemote() => WorkStream("Send", socket, TargetSocket);
             private void WorkStream(string tag, Socket read, Socket write)
             {
+                log.Info($"[{tag}] Start");
                 byte[] buffer = new byte[BUFFER_SIZE];
                 try
                 {
-                    lastTransmitTime = DateTime.Now;
+                    FailedDelayTimeLock delayLock = new FailedDelayTimeLock();
+
                     while (IsRun && read.Connected && write.Connected && !canceller.IsCancellationRequested)
                     {
                         int size = read.Receive(buffer, 0, buffer.Length, SocketFlags.None);
                         if (size > 0)
                         {
                             write.Send(buffer, 0, size, SocketFlags.None);
-                            lastTransmitTime = DateTime.Now;
+                            delayLock.Success();
                         }
-                        else if ((DateTime.Now - lastTransmitTime).TotalSeconds > 5)
+                        else if (delayLock.FailedDuration > options.timeout)
                         {
-                            log.Warn(tag + ": Timeout");
+                            log.Warn($"[{tag}] Timeout");
                             break;
+                        }
+                        else
+                        {
+                            delayLock.Wait();
                         }
                     }
                 }
                 catch (Exception e)
                 {
-                    Console.WriteLine(tag + " / " + e);
+                    log.Error($"[{tag}] {e.Message}", e);
+                }
+                finally
+                {
+                    log.Info($"[{tag}] End");
                 }
             }
         }

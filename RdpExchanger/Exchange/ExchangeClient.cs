@@ -55,8 +55,6 @@ namespace RdpExchanger
                         await Task.Delay(1000);
                         continue;
                     }
-                    remoteSck.ReceiveTimeout = 3000;
-                    remoteSck.SendTimeout = 3000;
 
                     // 헤더 데이터 전송
                     log.Info("Send RdpServerHeader");
@@ -97,6 +95,7 @@ namespace RdpExchanger
                 {
                     if (data[0] == OPCODE_CONNECT) // 데이터가 1이 넘어오면
                     {
+                        log.Debug("Connected");
                         return true;
                     }
                     else if (data[0] == OPCODE_ERROR)
@@ -212,7 +211,7 @@ namespace RdpExchanger
             {
                 while (IsRun)
                 {
-                    while (a.IsCompleted || a.IsFaulted || b.IsCompleted || b.IsFaulted)
+                    if (a.IsCompleted || a.IsFaulted || b.IsCompleted || b.IsFaulted)
                     {
                         break;
                     }
@@ -224,29 +223,40 @@ namespace RdpExchanger
             private void HostToRemote() => WorkStream("Send", hostSck, remoteSck);
             private void WorkStream(string tag, Socket read, Socket write)
             {
+                log.Info($"[{tag}] Start");
                 byte[] buffer = new byte[BUFFER_SIZE];
                 try
                 {
+                    FailedDelayTimeLock delayLock = new FailedDelayTimeLock();
                     lastTransmitTime = DateTime.Now;
+
                     while (IsRun && read.Connected && write.Connected && !canceller.IsCancellationRequested)
                     {
                         int size = read.Receive(buffer, 0, buffer.Length, SocketFlags.None);
                         if (size > 0)
                         {
-                            //log.Debug($"{tag} => {size}");
                             write.Send(buffer, 0, size, SocketFlags.None);
                             lastTransmitTime = DateTime.Now;
+                            delayLock.Success();
                         }
-                        else if((DateTime.Now-lastTransmitTime).TotalSeconds > 5)
+                        else if ((DateTime.Now - lastTransmitTime).TotalSeconds > options.timeout)
                         {
-                            log.Warn(tag+": Timeout");
+                            log.Warn($"[{tag}] Timeout");
                             break;
+                        }
+                        else
+                        {
+                            delayLock.Wait();
                         }
                     }
                 }
                 catch (Exception e)
                 {
-                    Console.WriteLine(tag + " / " + e);
+                    log.Error($"[{tag}] {e.Message}", e);
+                }
+                finally
+                {
+                    log.Info($"[{tag}] End");
                 }
             }
         }
