@@ -95,12 +95,18 @@ namespace RdpExchanger
                     var acceptSocket = await server.AcceptAsync(canceller.Token);
                     if (acceptSocket == null) continue;
 
-                    lock (this)
-                    {
-                        var st = Stopwatch.StartNew();
+                    var st = Stopwatch.StartNew();
 
-                        // 15초 이내에 대기중인 대상 할당
-                        while (st.ElapsedMilliseconds < 15000)
+                    // 15초 이내에 대기중인 대상 할당
+                    while (st.ElapsedMilliseconds < 15000)
+                    {
+                        if (Connections.Count == 0)
+                        {
+                            await Task.Delay(100);
+                            continue;
+                        }
+
+                        lock (this)
                         {
                             if (Connections[0].IsRun)
                             {
@@ -114,12 +120,12 @@ namespace RdpExchanger
                                 Connections.RemoveAt(0);
                             }
                         }
-                    
-                        // 대기시간동안 할당되지 않았다면 해제함
-                        if (acceptSocket != null)
-                        {
-                            acceptSocket.Disconnect(false);
-                        }
+                    }
+
+                    // 대기시간동안 할당되지 않았다면 해제함
+                    if (acceptSocket != null)
+                    {
+                        acceptSocket.Disconnect(false);
                     }
                 }
                 catch (Exception e)

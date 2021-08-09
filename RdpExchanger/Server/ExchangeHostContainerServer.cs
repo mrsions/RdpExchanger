@@ -78,7 +78,7 @@ namespace RdpExchanger
 
             log.Info("Request Stop Complete");
         }
-        
+
         private async Task Run()
         {
             while (IsRun)
@@ -374,7 +374,20 @@ namespace RdpExchanger
                 }
                 catch (Exception e)
                 {
-                    log.Error($"[{tag}] {e.Message}", e);
+                    var se = e as SocketException;
+                    if (se != null)
+                    {
+                        switch (se.SocketErrorCode)
+                        {
+                            default:
+                                log.Error($"[{tag}] {e.Message} (ER:{se.ErrorCode}/SE:{se.SocketErrorCode}/NE:{se.NativeErrorCode})", e);
+                                break;
+                        }
+                    }
+                    else
+                    {
+                        log.Error($"[{tag}] {e.Message}", e);
+                    }
                 }
                 finally
                 {
